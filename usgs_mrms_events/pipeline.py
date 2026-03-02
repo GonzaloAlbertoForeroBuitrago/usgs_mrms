@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import boto3
+from dotenv import load_dotenv
 import json
 import shutil
+import os
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,19 @@ from .usgs_api import (
     extract_inventory_row,
     fetch_monitoring_location,
 )
+
+# Load AWS credentials from .env file
+load_dotenv()
+key = os.getenv("KEY")
+secret = os.getenv("SECRET")
+bucket_name = os.getenv("BUCKET_NAME")
+
+def upload_to_s3(path):
+    s3 = boto3.resource("s3", aws_access_key_id=key, aws_secret_access_key=secret, region_name="us-east-1")
+    bucket = s3.Bucket("tgf-mentorship-gonzalo")
+    
+    bucket.upload_file(path, path)
+
 
 
 def run_site(
@@ -92,6 +108,8 @@ def run_site(
             missing_csv=paths["rain_missing_csv"],
         )
         paths["done_rain"].write_text(now_utc_iso(), encoding="utf-8")
+        upload_to_s3(paths["done_rain"])
+        
     else:
         hours_n = -1
         pixels_n = -1
