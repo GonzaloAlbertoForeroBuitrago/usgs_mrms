@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,8 @@ class PipelineConfig:
 
     # Base output
     base_dir: Path = Path("data").resolve()
+    # Logs (default: <base_dir>/logs)
+    log_dir: Optional[Path] = None
 
     # Step tuning
     window_days: int = 1000

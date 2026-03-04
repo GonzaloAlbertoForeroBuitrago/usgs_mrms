@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .logger import get_logger, setup_logging, site_logger
 from .config import PipelineConfig
 from .events import postprocess_events_and_windows
 from .io import append_inventory_row, now_utc_iso
@@ -19,6 +20,8 @@ from .usgs_api import (
     extract_inventory_row,
     fetch_monitoring_location,
 )
+
+log = get_logger("usgs_mrms_events.pipeline")
 
 # Load AWS credentials from .env file
 load_dotenv()
@@ -56,6 +59,14 @@ def run_site(
     """
     sid = normalize_site_id(site_id)
     cfg = config or PipelineConfig(base_dir=Path(base_dir).resolve())
+
+    # Ensure root logging exists (single-site runs)
+    setup_logging(log_dir=cfg.log_dir)
+
+    # Per-site logger (also used for multi-process runs)
+    slog = site_logger(sid, site_logs_dir=Path(cfg.log_dir) / "sites")
+
+    slog.info(f"[{sid}] starting | base_dir={cfg.base_dir}")
 
     # Step A: monitoring-location metadata (defines state + folder layout)
     feat = fetch_monitoring_location(cfg, sid)
