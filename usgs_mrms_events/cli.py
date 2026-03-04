@@ -48,3 +48,6 @@ def run_many_cmd(
     site_ids = [ln.strip() for ln in sites_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
     out = run_many(site_ids, start_date=start, end_date=end, base_dir=base_dir, overwrite=overwrite, upload=upload)
     typer.echo(out)
+
+if __name__ == "__main__":
+    app()
