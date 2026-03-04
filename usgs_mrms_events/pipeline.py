@@ -32,8 +32,6 @@ def upload_to_s3(path):
     
     bucket.upload_file(path, path)
 
-
-
 def run_site(
     *,
     site_id: str | int,
@@ -42,6 +40,7 @@ def run_site(
     base_dir: str | Path = "data",
     overwrite: bool = False,
     config: PipelineConfig | None = None,
+    upload: bool = True
 ) -> dict[str, Any]:
     """
     Run the unified pipeline for a single USGS site.
@@ -108,7 +107,8 @@ def run_site(
             missing_csv=paths["rain_missing_csv"],
         )
         paths["done_rain"].write_text(now_utc_iso(), encoding="utf-8")
-        upload_to_s3(paths["done_rain"])
+        if upload:
+            upload_to_s3(paths["done_rain"])
         
     else:
         hours_n = -1
@@ -151,6 +151,7 @@ def run_many(
     base_dir: str | Path = "data",
     overwrite: bool = False,
     config: PipelineConfig | None = None,
+    upload: bool = True
 ) -> dict[str, int]:
     ok = 0
     fail = 0
@@ -165,6 +166,7 @@ def run_many(
                 base_dir=base_dir,
                 overwrite=overwrite,
                 config=config,
+                upload=upload
             )
             ok += 1
         except Exception as e:

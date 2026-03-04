@@ -15,6 +15,7 @@ def run_site_cmd(
     end: str = typer.Option("2026-01-30", "--end", help="End date (YYYY-MM-DD)."),
     base_dir: Path = typer.Option(Path("data"), "--base-dir", help="Base output folder."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing outputs for this site."),
+    upload: bool = typer.Option(False, "--upload", help="Upload results to S3 after completion."),
 ) -> None:
     """
     Run the full pipeline for a single site.
@@ -25,6 +26,7 @@ def run_site_cmd(
         end_date=end,
         base_dir=base_dir,
         overwrite=overwrite,
+        upload=upload
     )
     typer.echo(f"[{result['site_id']}] completed. Rain Zarr: {result['paths']['rain_zarr']}")
 
@@ -36,6 +38,7 @@ def run_many_cmd(
     end: str = typer.Option("2026-01-30", "--end", help="End date (YYYY-MM-DD)."),
     base_dir: Path = typer.Option(Path("data"), "--base-dir", help="Base output folder."),
     overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing outputs per site."),
+    upload: bool = typer.Option(False, "--upload", help="Upload results to S3 after completion."),
 ) -> None:
     """
     Run the pipeline for many sites from a file (one site per line).
@@ -43,5 +46,5 @@ def run_many_cmd(
     from .pipeline import run_many
 
     site_ids = [ln.strip() for ln in sites_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    out = run_many(site_ids, start_date=start, end_date=end, base_dir=base_dir, overwrite=overwrite)
+    out = run_many(site_ids, start_date=start, end_date=end, base_dir=base_dir, overwrite=overwrite, upload=upload)
     typer.echo(out)
