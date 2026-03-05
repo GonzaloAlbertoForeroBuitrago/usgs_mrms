@@ -7,6 +7,7 @@ import shutil
 import os
 from pathlib import Path
 from typing import Any
+from multiprocessing import Pool, cpu_count
 
 from .logger import get_logger, setup_logging, site_logger
 from .config import PipelineConfig
@@ -28,12 +29,24 @@ load_dotenv()
 key = os.getenv("KEY")
 secret = os.getenv("SECRET")
 bucket_name = os.getenv("BUCKET_NAME")
+s3 = boto3.resource("s3", aws_access_key_id=key, aws_secret_access_key=secret, region_name="us-east-1")
+bucket = s3.Bucket(bucket_name)
 
 def upload_to_s3(path):
-    s3 = boto3.resource("s3", aws_access_key_id=key, aws_secret_access_key=secret, region_name="us-east-1")
-    bucket = s3.Bucket("tgf-mentorship-gonzalo")
-    
     bucket.upload_file(path, path)
+
+def _run_site_wrapper(args):
+    site_id, start_date, end_date, base_dir, overwrite, config, upload = args
+
+    return run_site(
+        site_id=site_id,
+        start_date=start_date,
+        end_date=end_date,
+        base_dir=base_dir,
+        overwrite=overwrite,
+        config=config,
+        upload=upload
+    )
 
 def run_site(
     *,
@@ -166,26 +179,22 @@ def run_many(
     base_dir: str | Path = "data",
     overwrite: bool = False,
     config: PipelineConfig | None = None,
-    upload: bool = True
+    upload: bool = True,
+    workers: int | None = None
 ) -> dict[str, int]:
+    workers = workers or min(cpu_count(), 8)
+
+    tasks = [(sid, start_date, end_date, base_dir, overwrite, config, upload) for sid in site_ids]
+
     ok = 0
     fail = 0
 
-    for i, sid in enumerate(site_ids, start=1):
-        try:
-            print(f"[{i}/{len(site_ids)}] {sid}")
-            run_site(
-                site_id=sid,
-                start_date=start_date,
-                end_date=end_date,
-                base_dir=base_dir,
-                overwrite=overwrite,
-                config=config,
-                upload=upload
-            )
-            ok += 1
-        except Exception as e:
-            print(f"[{sid}] FAILED: {type(e).__name__}: {e}")
-            fail += 1
+    with Pool(workers) as pool:
+        for result in pool.imap_unordered(_run_site_wrapper, tasks):
+            try:
+                ok += 1
+            except Exception as e:
+                print(f"[{result['site_id']}] FAILED in multi-process: {type(e).__name__}: {e}")
+                fail += 1
 
     return {"ok": ok, "fail": fail}
