@@ -54,6 +54,12 @@ class PipelineConfig:
     basin_gages_endpoint: str = "https://api.water.usgs.gov/fabric/pygeoapi/collections/gagesii-basins/items"
 
     def __post_init__(self) -> None:  # dataclass hook (even frozen)
+        object.__setattr__(self, "base_dir", Path(self.base_dir).resolve())
+
+        # Default log_dir is <base_dir>/logs if not set
+        resolved_log_dir = Path(self.log_dir).expanduser().resolve() if self.log_dir else (self.base_dir / "logs")
+        object.__setattr__(self, "log_dir", resolved_log_dir)
+        
         object.__setattr__(
             self,
             "http_headers_usgs",
