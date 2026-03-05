@@ -127,6 +127,10 @@ def run_site(
         files_ok = -1
 
     print(f"[{sid}] meta ✓  basin ✓  stage ✓ ({stage_rows} rows)  events ✓ ({n_events})  rain ✓")
+    slog.info(
+        f"[{sid}] completed | stage_rows={stage_rows} events={n_events} windows={n_windows} "
+        f"rain_hours={hours_n} rain_pixels={pixels_n} files_ok={files_ok} tz={tz_iana}"
+    )
 
     inv_row = {
         **inv,
