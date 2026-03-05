@@ -30,7 +30,7 @@ key = os.getenv("KEY")
 secret = os.getenv("SECRET")
 bucket_name = os.getenv("BUCKET_NAME")
 s3 = boto3.resource("s3", aws_access_key_id=key, aws_secret_access_key=secret, region_name="us-east-1")
-bucket = s3.Bucket(bucket_name)
+bucket = s3.Bucket("tgf-mentorship-gonzalo")
 
 def upload_to_s3(path):
     bucket.upload_file(path, path)
