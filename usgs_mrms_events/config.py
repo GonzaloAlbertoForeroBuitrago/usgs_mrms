@@ -16,6 +16,8 @@ class PipelineConfig:
     base_dir: Path = Path("data").resolve()
     # Logs (default: <base_dir>/logs)
     log_dir: Optional[Path] = None
+    # Shared MRMS cache (default: <base_dir>/_mrms_cache)
+    mrms_cache_dir: Optional[Path] = None
 
     # Step tuning
     window_days: int = 1000
@@ -42,6 +44,11 @@ class PipelineConfig:
     sleep_between_min: float = 0.02
     sleep_between_max: float = 0.06
     debug_every_n: int = 50
+
+    # Parallel defaults
+    default_workers: int = 4
+    max_workers_cap: int = 8
+
     @property
     def sleep_between(self) -> tuple[float, float]:
         """Compatibility tuple for random sleep."""
@@ -54,12 +61,20 @@ class PipelineConfig:
     basin_gages_endpoint: str = "https://api.water.usgs.gov/fabric/pygeoapi/collections/gagesii-basins/items"
 
     def __post_init__(self) -> None:  # dataclass hook (even frozen)
-        object.__setattr__(self, "base_dir", Path(self.base_dir).resolve())
+        object.__setattr__(self, "base_dir", Path(self.base_dir).expanduser().resolve())
 
         # Default log_dir is <base_dir>/logs if not set
         resolved_log_dir = Path(self.log_dir).expanduser().resolve() if self.log_dir else (self.base_dir / "logs")
         object.__setattr__(self, "log_dir", resolved_log_dir)
-        
+
+        # Default shared MRMS cache outside per-station folders
+        resolved_cache_dir = (
+            Path(self.mrms_cache_dir).expanduser().resolve()
+            if self.mrms_cache_dir
+            else (self.base_dir / "_mrms_cache")
+        )
+        object.__setattr__(self, "mrms_cache_dir", resolved_cache_dir)
+
         object.__setattr__(
             self,
             "http_headers_usgs",

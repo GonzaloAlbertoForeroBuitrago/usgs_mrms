@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import gzip
+import os
 import random
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -57,11 +59,17 @@ def hours_from_windows(df: pd.DataFrame, start_col: str, end_col: str) -> pd.Dat
     return pd.DatetimeIndex(times).unique().sort_values()
 
 
-def radaronly_aws_url(cfg: PipelineConfig, ts) -> str:
+def radaronly_filename(ts) -> str:
     ts = as_utc(ts).floor("h")
     d = ts.strftime("%Y%m%d")
     hms = ts.strftime("%H%M%S")
-    fn = f"MRMS_RadarOnly_QPE_01H_00.00_{d}-{hms}.grib2.gz"
+    return f"MRMS_RadarOnly_QPE_01H_00.00_{d}-{hms}.grib2.gz"
+
+
+def radaronly_aws_url(cfg: PipelineConfig, ts) -> str:
+    ts = as_utc(ts).floor("h")
+    d = ts.strftime("%Y%m%d")
+    fn = radaronly_filename(ts)
     return f"{cfg.aws_radaronly}/{d}/{fn}"
 
 
@@ -74,6 +82,12 @@ def radaronly_mt_url(cfg: PipelineConfig, ts) -> str:
     return f"{cfg.mtarchive}/{dpath}/mrms/ncep/RadarOnly_QPE_01H/{fn}"
 
 
+def cache_path_for_hour(cache_dir: Path, ts) -> Path:
+    ts = as_utc(ts).floor("h")
+    day = ts.strftime("%Y%m%d")
+    return Path(cache_dir) / day / radaronly_filename(ts)
+
+
 def robust_get(sess: requests.Session, url: str, timeout: int, max_tries: int = 6) -> Optional[requests.Response]:
     for attempt in range(1, max_tries + 1):
         try:
@@ -82,29 +96,87 @@ def robust_get(sess: requests.Session, url: str, timeout: int, max_tries: int = 
             requests.exceptions.ConnectionError,
             requests.exceptions.ReadTimeout,
             requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.Timeout,
         ):
             wait = min(60.0, (2**attempt) + random.uniform(0, 1.5))
             time.sleep(wait)
     return None
 
 
-def first_available_radaronly(cfg: PipelineConfig, times: pd.DatetimeIndex, max_checks: int = 80, widen: int = 48) -> tuple[pd.Timestamp, bytes]:
+def _gzip_content_looks_valid(data: bytes) -> bool:
+    return len(data) > 2 and data[:2] == b"\x1f\x8b"
+
+
+def _read_cache_bytes(cache_fp: Path) -> Optional[bytes]:
+    try:
+        data = cache_fp.read_bytes()
+        if not _gzip_content_looks_valid(data):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+def get_or_download_radaronly(
+    cfg: PipelineConfig,
+    sess: requests.Session,
+    ts,
+    *,
+    cache_dir: Path,
+) -> tuple[Optional[bytes], str, str]:
+    ts = as_utc(ts).floor("h")
+    cache_fp = cache_path_for_hour(cache_dir, ts)
+
+    cached = _read_cache_bytes(cache_fp)
+    if cached is not None:
+        return cached, "cache", cache_fp.as_posix()
+
+    urls = [("aws", radaronly_aws_url(cfg, ts)), ("mt", radaronly_mt_url(cfg, ts))]
+    for src, url in urls:
+        r = robust_get(sess, url, cfg.http_timeout_mrms, max_tries=6)
+        if (r is None) or (r.status_code != 200) or (not _gzip_content_looks_valid(r.content)):
+            continue
+
+        try:
+            _atomic_write_bytes(cache_fp, r.content)
+        except Exception:
+            # If another worker wrote the same file first, keep going and use the bytes we already have.
+            pass
+        return r.content, src, url
+
+    return None, "missing", urls[-1][1]
+
+
+def first_available_radaronly(
+    cfg: PipelineConfig,
+    times: pd.DatetimeIndex,
+    max_checks: int = 80,
+    widen: int = 48,
+) -> tuple[pd.Timestamp, bytes]:
     sess = requests.Session()
     sess.headers.update(cfg.http_headers_mrms)
 
     def try_one(ts0: pd.Timestamp) -> Optional[tuple[pd.Timestamp, bytes]]:
         ts0 = as_utc(ts0)
-
-        u_aws = radaronly_aws_url(cfg, ts0)
-        r = robust_get(sess, u_aws, cfg.http_timeout_mrms, max_tries=3)
-        if r is not None and r.status_code == 200 and r.content[:2] == b"\x1f\x8b":
-            return ts0, r.content
-
-        u_mt = radaronly_mt_url(cfg, ts0)
-        r = robust_get(sess, u_mt, cfg.http_timeout_mrms, max_tries=3)
-        if r is not None and r.status_code == 200 and r.content[:2] == b"\x1f\x8b":
-            return ts0, r.content
-
+        data, src, _ = get_or_download_radaronly(cfg, sess, ts0, cache_dir=Path(cfg.mrms_cache_dir))
+        if data is not None:
+            print(f"[MRMS GEOREF] {ts0} source={src}")
+            return ts0, data
         return None
 
     try:
@@ -192,7 +264,7 @@ def ensure_pixel_arrays(cfg: PipelineConfig, root: zarr.hierarchy.Group, mask: d
         root[name].attrs["_ARRAY_DIMENSIONS"] = dims
 
 
-def resume_fill_rain(cfg: PipelineConfig, out_path: Path, mask: dict, missing_csv: Path) -> Tuple[int, int]:
+def resume_fill_rain(cfg: PipelineConfig, out_path: Path, mask: dict, missing_csv: Path) -> Tuple[int, int, int]:
     gdal = _require_gdal()
 
     root = zarr.open_group(out_path.as_posix(), mode="r+", zarr_version=2)
@@ -212,7 +284,7 @@ def resume_fill_rain(cfg: PipelineConfig, out_path: Path, mask: dict, missing_cs
 
     missing_idx = np.where(~done)[0]
     if missing_idx.size == 0:
-        return 0, 0
+        return 0, 0, 0
     start_idx = int(missing_idx[0])
 
     sess = requests.Session()
@@ -221,55 +293,77 @@ def resume_fill_rain(cfg: PipelineConfig, out_path: Path, mask: dict, missing_cs
     missing_rows: list[tuple[str, str, str]] = []
     aws_ok = 0
     mt_ok = 0
+    cache_hits = 0
 
     rows = mask["rows"]
     cols = mask["cols"]
 
     try:
         for i in range(start_idx, n):
-            if np.isfinite(rain[i, :]).any():
+            try:
+                if np.isfinite(rain[i, :]).any():
+                    continue
+            except Exception as e:
+                ts = pd.Timestamp(times[i]).tz_localize("UTC")
+                missing_rows.append((str(ts), out_path.as_posix(), f"zarr_read_failed:{type(e).__name__}"))
                 continue
 
             ts = pd.Timestamp(times[i]).tz_localize("UTC")
+            data, src, source_ref = get_or_download_radaronly(cfg, sess, ts, cache_dir=Path(cfg.mrms_cache_dir))
 
-            url_aws = radaronly_aws_url(cfg, ts)
-            r = robust_get(sess, url_aws, cfg.http_timeout_mrms, max_tries=6)
-            url = url_aws
-            src = "aws"
-
-            if (r is None) or (r.status_code != 200):
-                url_mt = radaronly_mt_url(cfg, ts)
-                r = robust_get(sess, url_mt, cfg.http_timeout_mrms, max_tries=6)
-                url = url_mt
-                src = "mt"
-
-            if (r is None) or (r.status_code != 200):
+            if data is None:
                 rain[i, :] = np.nan
-                code = "no_response" if r is None else f"http_{r.status_code}"
-                missing_rows.append((str(ts), url, code))
+                missing_rows.append((str(ts), source_ref, "download_missing"))
             else:
                 if src == "aws":
                     aws_ok += 1
-                else:
+                elif src == "mt":
                     mt_ok += 1
+                elif src == "cache":
+                    cache_hits += 1
 
-                raw = gzip.decompress(r.content)
-                vs = f"/vsimem/mrms_{i}.grib2"
-                gdal.FileFromMemBuffer(vs, raw)
-
-                ds = gdal.Open(vs)
-                if ds is None:
+                raw: bytes | None = None
+                try:
+                    raw = gzip.decompress(data)
+                except Exception as e:
                     rain[i, :] = np.nan
-                    missing_rows.append((str(ts), url, "gdal_open_failed"))
-                else:
-                    arr2d = ds.ReadAsArray()
-                    rain[i, :] = arr2d[rows, cols].astype(cfg.dtype, copy=False)
+                    missing_rows.append((str(ts), source_ref, f"gzip_decompress_failed:{type(e).__name__}"))
 
-                ds = None
-                gdal.Unlink(vs)
+                if raw is not None:
+                    vs = f"/vsimem/mrms_{i}_{os.getpid()}.grib2"
+                    ds = None
+                    try:
+                        gdal.FileFromMemBuffer(vs, raw)
+                        ds = gdal.Open(vs)
+                        if ds is None:
+                            rain[i, :] = np.nan
+                            missing_rows.append((str(ts), source_ref, "gdal_open_failed"))
+                        else:
+                            try:
+                                arr2d = ds.ReadAsArray()
+                                if arr2d is None:
+                                    rain[i, :] = np.nan
+                                    missing_rows.append((str(ts), source_ref, "gdal_read_array_failed"))
+                                else:
+                                    rain[i, :] = arr2d[rows, cols].astype(cfg.dtype, copy=False)
+                            except Exception as e:
+                                rain[i, :] = np.nan
+                                missing_rows.append((str(ts), source_ref, f"gdal_read_failed:{type(e).__name__}"))
+                    except Exception as e:
+                        rain[i, :] = np.nan
+                        missing_rows.append((str(ts), source_ref, f"gdal_mem_failed:{type(e).__name__}"))
+                    finally:
+                        ds = None
+                        try:
+                            gdal.Unlink(vs)
+                        except Exception:
+                            pass
 
             if (i + 1) % cfg.debug_every_n == 0 or (i + 1) == n:
-                print(f"  [rain] {i+1}/{n} aws_ok={aws_ok} mt_ok={mt_ok} missing_new={len(missing_rows)}")
+                print(
+                    f"  [rain] {i+1}/{n} aws_ok={aws_ok} mt_ok={mt_ok} "
+                    f"cache={cache_hits} missing_new={len(missing_rows)}"
+                )
 
             time.sleep(random.uniform(*cfg.sleep_between))
     finally:
@@ -278,8 +372,12 @@ def resume_fill_rain(cfg: PipelineConfig, out_path: Path, mask: dict, missing_cs
     if missing_rows:
         miss_df = pd.DataFrame(missing_rows, columns=["time_utc", "url", "reason"])
         if missing_csv.exists():
-            old = pd.read_csv(missing_csv)
-            miss_df = pd.concat([old, miss_df], ignore_index=True).drop_duplicates(subset=["time_utc"], keep="last")
+            try:
+                old = pd.read_csv(missing_csv)
+                miss_df = pd.concat([old, miss_df], ignore_index=True).drop_duplicates(subset=["time_utc"], keep="last")
+            except Exception:
+                pass
+        missing_csv.parent.mkdir(parents=True, exist_ok=True)
         miss_df.to_csv(missing_csv, index=False)
 
     try:
@@ -287,7 +385,7 @@ def resume_fill_rain(cfg: PipelineConfig, out_path: Path, mask: dict, missing_cs
     except Exception:
         pass
 
-    return aws_ok, mt_ok
+    return aws_ok, mt_ok, cache_hits
 
 
 def build_zarr_radaronly_from_windows(
@@ -297,7 +395,21 @@ def build_zarr_radaronly_from_windows(
     out_zarr: Path,
     missing_csv: Path,
 ) -> Tuple[int, int, int]:
-    top = pd.read_csv(windows_csv, parse_dates=["date_peak", "start_rain", "end_rain"])
+    windows_csv = Path(windows_csv)
+    basin_json = Path(basin_json)
+    out_zarr = Path(out_zarr)
+    missing_csv = Path(missing_csv)
+
+    if not windows_csv.exists():
+        raise FileNotFoundError(f"windows_csv not found: {windows_csv}")
+    if not basin_json.exists():
+        raise FileNotFoundError(f"basin_json not found: {basin_json}")
+
+    try:
+        top = pd.read_csv(windows_csv, parse_dates=["date_peak", "start_rain", "end_rain"])
+    except Exception as e:
+        raise RuntimeError(f"Could not read windows_csv: {windows_csv}") from e
+
     times = hours_from_windows(top, "start_rain", "end_rain")
     if len(times) == 0:
         return 0, 0, 0
@@ -306,5 +418,5 @@ def build_zarr_radaronly_from_windows(
     mask = build_mask_and_lonlat_from_basin(basin_json, gz_bytes, dtype=cfg.dtype)
 
     init_zarr(times, out_zarr)
-    aws_ok, mt_ok = resume_fill_rain(cfg, out_zarr, mask, missing_csv)
-    return int(len(times)), int(mask["rows"].size), int(aws_ok + mt_ok)
+    aws_ok, mt_ok, cache_hits = resume_fill_rain(cfg, out_zarr, mask, missing_csv)
+    return int(len(times)), int(mask["rows"].size), int(aws_ok + mt_ok + cache_hits)

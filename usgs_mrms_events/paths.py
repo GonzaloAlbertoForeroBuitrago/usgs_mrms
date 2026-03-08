@@ -30,7 +30,8 @@ def safe_state_folder(state_name: str | None) -> str:
     return str(state_name).strip().upper().replace(" ", "_")
 
 
-def _ensure_parent(path: Path) -> None:
+def ensure_path_parent(path: Path) -> None:
+    """Create only the direct parent directory for a file path when needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -38,6 +39,10 @@ def build_station_paths(base_dir: Path, site_id: str, state_name: str | None) ->
     """Deterministic folder layout.
 
     data/{events,basins_json,stage_parquet,site_meta,rain_zarr}/STATE/AA/AAAA/{site_id}.*
+
+    Important:
+    This function only *builds* paths. It does not create directories automatically.
+    That avoids thousands of empty folders/zarr paths for stations that are skipped.
     """
     sid = normalize_site_id(site_id)
     p2, p4 = prefixes(sid)
@@ -50,7 +55,7 @@ def build_station_paths(base_dir: Path, site_id: str, state_name: str | None) ->
     events_dir = base_dir / "events"
     rain_dir = base_dir / "rain_zarr"
 
-    paths: dict[str, Path] = {
+    return {
         "basin_json": basin_dir / rel / f"{sid}.json",
         "stage_parquet": stage_dir / rel / f"{sid}.parquet",
         "site_meta_json": meta_dir / rel / f"{sid}_monitoring_location.json",
@@ -65,7 +70,3 @@ def build_station_paths(base_dir: Path, site_id: str, state_name: str | None) ->
         "done_rain": rain_dir / rel / f"{sid}.rain.done",
         "inventory_csv": base_dir / "stations_inventory.csv",
     }
-
-    for p in paths.values():
-        _ensure_parent(p)
-    return paths
