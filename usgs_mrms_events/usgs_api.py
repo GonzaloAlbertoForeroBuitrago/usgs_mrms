@@ -14,10 +14,36 @@ from .io import date_windows, now_utc_iso
 from .paths import normalize_site_id
 
 
-def get_json(url: str, *, params: Optional[dict] = None, timeout: int = 60, headers: Optional[dict] = None) -> dict:
-    r = requests.get(url, params=params, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+def get_json(
+    url: str,
+    *,
+    params: Optional[dict] = None,
+    timeout: int = 60,
+    headers: Optional[dict] = None,
+    max_retries: int = 5,
+) -> dict:
+    """
+    Send a GET request and return JSON.
+    If USGS responds with 429, wait and retry a few times.
+    """
+    for attempt in range(1, max_retries + 1):
+        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+
+        # Success
+        if r.status_code == 200:
+            return r.json()
+
+        # Rate limit: wait and retry
+        if r.status_code == 429:
+            wait_s = min(60, 2 ** attempt)
+            print(f"[USGS 429] attempt {attempt}/{max_retries}, waiting {wait_s}s")
+            time.sleep(wait_s)
+            continue
+
+        # Any other HTTP error
+        r.raise_for_status()
+
+    raise RuntimeError(f"USGS request failed after {max_retries} retries: {url}")
 
 
 def fetch_monitoring_location(cfg: PipelineConfig, site_id: str) -> dict:
@@ -116,18 +142,24 @@ def build_continuous_url(cfg: PipelineConfig, site_id: str, ts_id: Optional[str]
 
 def paged_features(cfg: PipelineConfig, url: str) -> Iterable[dict]:
     next_url = url
+
     while next_url:
-        r = requests.get(next_url, headers=cfg.http_headers_usgs, timeout=cfg.http_timeout_usgs)
-        r.raise_for_status()
-        payload = r.json()
+        payload = get_json(
+            next_url,
+            timeout=cfg.http_timeout_usgs,
+            headers=cfg.http_headers_usgs,
+        )
+
         for feat in payload.get("features", []):
             yield feat
+
         next_url = next(
             (lk.get("href") for lk in payload.get("links", []) if lk.get("rel") == "next" and lk.get("href")),
             None,
         )
+
         if next_url:
-            time.sleep(0.15 + random.uniform(0.0, 0.1))
+            time.sleep(0.2)
 
 
 def fetch_stage_window(cfg: PipelineConfig, site_id: str, ts_id: Optional[str], start_dt: str, end_dt: str) -> Optional[pd.DataFrame]:

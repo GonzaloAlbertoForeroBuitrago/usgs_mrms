@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ class PipelineConfig:
 
     http_headers_usgs: dict[str, str] = None  # type: ignore[assignment]
     http_headers_mrms: dict[str, str] = None  # type: ignore[assignment]
+    usgs_api_key: Optional[str] = None
 
     # MRMS RadarOnly
     aws_radaronly: str = "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/RadarOnly_QPE_01H_00.00"
@@ -75,16 +77,23 @@ class PipelineConfig:
         )
         object.__setattr__(self, "mrms_cache_dir", resolved_cache_dir)
 
-        object.__setattr__(
-            self,
-            "http_headers_usgs",
-            self.http_headers_usgs
-            or {
-                "User-Agent": "usgs-mrms-events/0.1",
-                "Accept": "application/geo+json, application/json;q=0.9, */*;q=0.1",
-                "Accept-Encoding": "gzip",
-            },
-        )
+        resolved_usgs_api_key = self.usgs_api_key or os.getenv("USGS_API_KEY")
+        object.__setattr__(self, "usgs_api_key", resolved_usgs_api_key)
+
+        resolved_http_headers_usgs = self.http_headers_usgs or {
+            "User-Agent": "usgs-mrms-events/0.1",
+            "Accept": "application/geo+json, application/json;q=0.9, */*;q=0.1",
+            "Accept-Encoding": "gzip",
+        }
+        resolved_http_headers_usgs = dict(resolved_http_headers_usgs)
+
+        if resolved_usgs_api_key:
+            resolved_http_headers_usgs["X-Api-Key"] = resolved_usgs_api_key
+
+        object.__setattr__(self, "http_headers_usgs", resolved_http_headers_usgs)
+
+       
+
         object.__setattr__(
             self,
             "http_headers_mrms",
