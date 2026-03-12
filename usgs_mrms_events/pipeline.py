@@ -26,7 +26,8 @@ from .usgs_api import (
 log = get_logger("usgs_mrms_events.pipeline")
 
 # Load AWS credentials from .env file
-load_dotenv("../env/aws_credentials.env")
+ENV_PATH = Path(__file__).resolve().parent.parent / "env" / "aws_credentials.env"
+load_dotenv(ENV_PATH)
 
 
 def _build_s3_bucket():
