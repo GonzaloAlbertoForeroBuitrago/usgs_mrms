@@ -274,7 +274,13 @@ def run_site(
             )
             paths["done_rain"].write_text(now_utc_iso(), encoding="utf-8")
             if upload:
-                upload_to_s3(paths["done_rain"], slog=slog)
+                try:
+                    upload_to_s3(paths["done_rain"], slog=slog)
+                    # Delete the zarr folder after successful upload
+                    shutil.rmtree(paths["rain_zarr"], ignore_errors=True)
+                except Exception as e:
+                    slog.exception(f"[{sid}] upload to S3 failed: {e}")
+
         else:
             hours_n = -1
             pixels_n = -1
