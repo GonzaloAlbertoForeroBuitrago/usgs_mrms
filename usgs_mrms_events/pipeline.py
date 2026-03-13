@@ -6,6 +6,7 @@ import shutil
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Any
+from xxlimited import Str
 
 import boto3
 from dotenv import load_dotenv
@@ -49,22 +50,31 @@ def _build_s3_bucket():
         return None
 
 
-def upload_to_s3(path: Path, slog=None) -> bool:
+def upload_to_s3(file_path: Path, target_path: Str, slog=None) -> bool:
     bucket = _build_s3_bucket()
     if bucket is None:
         if slog:
-            slog.warning(f"S3 upload skipped; bucket/credentials unavailable for {path}")
+            slog.warning(f"S3 upload skipped; bucket/credentials unavailable for {file_path}")
         return False
 
     try:
-        bucket.upload_file(str(path), str(path))
+        bucket.upload_file(str(file_path), target_path)
         if slog:
-            slog.info(f"Uploaded to S3: {path}")
+            slog.info(f"Uploaded to S3: {file_path} -> {target_path}")
         return True
     except Exception as e:
         if slog:
-            slog.exception(f"S3 upload failed for {path}: {e}")
+            slog.exception(f"S3 upload failed for {file_path} -> {target_path}: {e}")
         return False
+    
+def get_target_s3_path(file_path: Path) -> str:
+    # Given a file_path, build S3 path as last 3 parent dirs + file name
+    file_path = Path(file_path)
+    parts = file_path.parts
+    # Get last 3 parent directories (if available)
+    parent_dirs = parts[-4:-1] if len(parts) >= 4 else parts[1:-1]
+    s3_path = "/".join(parent_dirs + [file_path.name])
+    return s3_path
 
 
 def _run_site_wrapper(args):
@@ -275,9 +285,13 @@ def run_site(
             paths["done_rain"].write_text(now_utc_iso(), encoding="utf-8")
             if upload:
                 try:
-                    upload_to_s3(paths["done_rain"], slog=slog)
+                    zarr_path = get_target_s3_path(paths["rain_zarr"])
+                    parquet_path = get_target_s3_path(paths["stage_parquet"])
+                    upload_to_s3(paths["rain_zarr"], zarr_path, slog=slog)
+                    upload_to_s3(paths["stage_parquet"], parquet_path, slog=slog)
                     # Delete the zarr folder after successful upload
                     shutil.rmtree(paths["rain_zarr"], ignore_errors=True)
+                    shutil.rmtree(paths["stage_parquet"], ignore_errors=True)
                 except Exception as e:
                     slog.exception(f"[{sid}] upload to S3 failed: {e}")
 
